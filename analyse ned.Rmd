@@ -1,0 +1,389 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+require(tidyverse)
+require(tidytext)
+load('~/Documents/work/data work/ned.RData')
+```
+
+```{r}
+ned <- postDF %>%
+  mutate(
+    content=gsub("<.*?>", "",content),
+    content=tolower(content), 
+    content=gsub("[^0-9a-z \\.\\']", '', content),
+    content=gsub('\\.', ' ', content)
+  )
+```
+
+```{r}
+head(ned$content)
+```
+
+```{r}
+ned_analysis <- ned %>% 
+  select(post_id, post_name, Date, content) %>%
+  unnest_tokens(word, content) %>% 
+  anti_join(stop_words) %>% 
+  mutate(word=gsub("\\'",'',word))
+```
+
+```{r}
+head(ned_analysis)
+```
+
+```{r}
+# let's count the big words here
+ned_analysis %>% 
+  count(word, sort=T) %>% 
+  head(20)
+```
+
+```{r}
+extraStops <- tibble(word=c('people', 'time'))
+ned_analysis <- ned_analysis %>% anti_join(extraStops)
+```
+
+```{r}
+ned_tfidf <- ned_analysis %>%
+  count(post_id, word, sort=T) %>%
+  bind_tf_idf(word, post_id, n) %>% 
+  arrange(post_id, -tf_idf) %>% 
+  left_join(ned %>% distinct(post_id, post_name, Date), by='post_id')
+  
+```
+
+```{r}
+ned_tfidf %>% filter(n>=5) %>% head()
+```
+
+```{r}
+ned_tfidf_matrix <- ned_tfidf %>% 
+  filter(n>1) %>%
+  select(post_id, post_name, Date, word, tf_idf) %>%
+  spread(word, tf_idf) %>% 
+  replace(., is.na(.), 0)
+```
+
+```{r}
+ned_tfidf_matrix[1:5,2001:2020]
+```
+
+The Following code is taken from https://juliasilge.com/blog/sherlock-holmes-stm/ and uses topic modelling 
+
+```{r}
+require(quanteda)
+ned_dfm <- ned_analysis %>% 
+  count(post_id, word, sort=T) %>% 
+  cast_dfm(post_id, word, n)
+```
+
+```{r}
+require(stm)
+topic_model <- stm(ned_dfm, K = 10, 
+                   verbose = FALSE, init.type = "Spectral")
+```
+
+```{r}
+ned_topics <- tidy(topic_model)
+```
+
+```{r}
+head(ned_topics)
+```
+
+```{r}
+
+ned_topics %>%
+    group_by(topic) %>%
+    top_n(10, beta) %>%
+    ungroup() %>%
+    mutate(topic = paste0("Topic ", topic)) %>%
+    ggplot(aes(term, beta, fill = as.factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y") +
+    coord_flip() +
+    labs(x = NULL, y = expression(beta),
+         title = "Highest word probabilities for each topic",
+         subtitle = "Different words are associated with different topics")
+```
+That clearly didn't work. We need some other analysis to look for topics. Why not K-means on the TFIDF matrix? 
+
+```{r}
+names(ned_tfidf_matrix)[1:30]
+```
+
+
+```{r}
+ned_clusters <- kmeans(ned_tfidf_matrix %>% select(-post_id, -post_name, -Date), 10, 20, 5)
+```
+
+```{r}
+names(ned_clusters)
+```
+
+```{r}
+blog_clusters <- ned_tfidf_matrix %>% 
+  select(post_id, post_name, Date) %>% 
+  mutate(Cluster=ned_clusters$cluster) %>% 
+  left_join(
+    postDF %>% select(post_id, title)
+  )
+```
+
+```{r}
+head(blog_clusters)
+```
+
+```{r}
+blog_clusters %>% count(Cluster)
+```
+
+```{r}
+blog_clusters %>% filter(Cluster!= 1 & Cluster != 4) %>% group_by(Cluster) %>% select(Cluster, title, Date) %>% arrange(Cluster)
+```
+This also seems absolutely useless! Absolutely no insights! 
+
+Next, let's see if we can restrict to dictionary words (those for which part of speech is defined), and see it that can result in better results
+```{r}
+ned_english_tfidf <- ned_analysis %>% 
+  inner_join(parts_of_speech, by='word') %>%
+  count(post_id, word, sort=T) %>%
+  filter(n>1) %>%
+  bind_tf_idf(word, post_id, n) %>% 
+  arrange(post_id, -tf_idf) %>% 
+  left_join(ned %>% distinct(post_id, post_name, Date), by='post_id') %>%
+  select(post_id, post_name, Date, word, tf_idf) %>%
+  spread(word, tf_idf) %>% 
+  replace(., is.na(.), 0)
+
+```
+
+```{r}
+names(ned_english_tfidf)[1:50]
+```
+
+```{r}
+ned_clusters <- kmeans(ned_english_tfidf %>% select(-post_id, -post_name, -Date), 10)
+blog_clusters_english <- ned_english_tfidf %>% 
+  select(post_id, post_name, Date) %>% 
+  mutate(Cluster=ned_clusters$cluster) %>% 
+  left_join(
+    postDF %>% select(post_id, title)
+  )
+```
+
+```{r}
+blog_clusters_english %>% count(Cluster)
+```
+
+Again, KMeans doesn't seem to have any perceptible effect. 
+
+```{r}
+require(topicmodels)
+```
+
+```{r}
+
+?LDA
+```
+
+```{r}
+ned_tfidf
+```
+
+```{r}
+nedlda <- ned_tfidf %>% 
+  cast_dtm(post_id, word, n) %>%
+  LDA(k=10)
+nedldabeta <- tidy(nedlda, 'beta')
+nedldagamma <- tidy(nedlda, 'gamma')
+```
+
+```{r}
+head(nedldabeta)
+```
+
+```{r}
+# How many documents belong to each of hte topics? 
+
+nedldagamma %>%
+  arrange(-gamma) %>% 
+  distinct(document, .keep_all=T) %>% 
+  count(topic)
+```
+
+```{r}
+nedldabeta %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()
+```
+
+```{r}
+topicNames <- nedldabeta %>%
+  group_by(topic) %>% 
+  top_n(5, beta) %>% 
+  arrange(-beta) %>% 
+  summarise(topicName=paste(term, collapse='-'))
+
+topicNames
+```
+
+```{r}
+blogTopics <- nedldagamma %>%
+  arrange(-gamma) %>% 
+  distinct(document, .keep_all=T) %>% 
+  left_join(topicNames, by='topic') %>%
+  rename(post_id=document) %>%
+  left_join(ned %>% select(post_id, post_name, Date, title, content), by='post_id') %>%
+  arrange(Date)
+blogTopics %>% head()
+```
+
+How have I posted on different topics over time? 
+
+```{r}
+blogTopics %>%
+  group_by(topicName) %>% 
+  mutate(postNum=rank(Date, ties.method='first'), prop=postNum/max(postNum)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x=Date,y=prop)) + geom_line() + facet_wrap(~topicName) + geom_segment(aes(x=min(ned$Date), xend=max(ned$Date), y=0, yend=1), col='red')
+
+```
+The same thing, now by year 
+
+```{r}
+blogTopics %>%
+  mutate(Year=as.numeric(format(Date, '%Y'))) %>%
+  count(topicName, Year) %>%
+  group_by(Year) %>% 
+  mutate(Prop=n/sum(n)) %>% 
+  ungroup() %>%
+  ggplot(aes(x=Year,y=n)) + geom_col() + facet_wrap(~topicName, scales='free')
+```
+
+```{r}
+nedldagamma %>% head() 
+```
+
+
+```{r}
+
+```
+Very good. Fairly even distribution. Now to see what each topic has. 
+```{r}
+?get_sentiments
+```
+
+
+Then we'll look at the sentiment of the posts over time, to see how my mood has changed over the years
+```{r}
+head(sentiments)
+get_sentiments('afinn')
+get_sentiments('bing')
+get_sentiments('nrc')
+get_sentiments('loughran')
+```
+
+```{r}
+ned_analysis %>%
+  inner_join(get_sentiments('bing')) %>%
+  mutate(score=ifelse(sentiment=='negative', -1, 1)) %>% 
+  group_by(post_id, post_name, Date) %>%
+  summarise(score=mean(score)) %>%
+  mutate(Month=as.Date(paste(format(Date,'%Y-%m-'),'01',sep=''))) %>%
+  group_by(Month) %>%
+  summarise(score=mean(score), n=n()) %>%
+  ggplot(aes(x=Month,y=score)) + geom_line() + geom_smooth(span=0.1) + scale_x_date(date_breaks='years') + geom_vline(xintercept = c(as.Date('2007-04-11'),as.Date('2009-10-23'), as.Date('2012-06-16'), as.Date('2010-11-28'), as.Date('2016-09-15')), col='red', lty=2) + theme_bw()
+```
+
+```{r}
+ned_analysis %>%
+  inner_join(get_sentiments('nrc')) %>%
+  count(post_id, post_name, Date, sentiment) %>%
+  group_by(post_id, post_name, Date) %>%
+  mutate(score=n/sum(n)) %>%
+  mutate(Month=as.Date(paste(format(Date,'%Y-%m-'),'01',sep=''))) %>%
+  group_by(Month, sentiment) %>%
+  summarise(score=mean(score), n=n()) %>%
+  ggplot(aes(x=Month,y=score)) + geom_line() + geom_smooth(span=0.1) + scale_x_date(date_breaks='years') + geom_vline(xintercept = c(as.Date('2007-04-11'),as.Date('2009-10-23'), as.Date('2012-06-16'), as.Date('2010-11-28'), as.Date('2016-09-15')), col='red', lty=2) + theme_bw() + facet_wrap(~sentiment, scales='free_y')
+```
+
+```{r}
+save.image('ned-analysis.RData')
+```
+
+
+```{r}
+ned_phrases <- ned %>%
+  select(post_id, post_name, Date, content) %>%
+  unnest_tokens(phrases, content, token='ngrams', n=5, n_min=2)
+```
+
+```{r}
+ned_phrases %>% head()
+```
+
+```{r}
+ned_phrases <- ned_phrases %>%
+  mutate(numWords=str_count(phrases, ' ') + 1)
+```
+
+```{r}
+non_stop_phrases <- ned_phrases %>% 
+  mutate(
+    First=word(phrases, 1), 
+    Last=word(phrases, -1)
+  )
+    FirstStop=First %in% stop_words$word, 
+    LastStop=Last %in% stop_words$word,
+    NonStop=!FirstStop & !LastStop
+    ) %>%
+  filter(NonStop) %>% 
+  select(-First, -Last, -FirstStop, -LastStop, -NonStop)
+
+````
+```{r}
+?word
+```
+
+```{r}
+ned_phrase_count <- non_stop_phrases %>% ungroup() %>% count(phrases, sort=T)
+```
+
+```{r}
+ned_phrase_count %>%  
+  mutate(numWords=str_count(phrases, ' ') + 1) %>%
+  filter(numWords==5) %>%
+  head()
+```
+
+
+
+```{r}
+non_stop_phrases %>% head()
+```
+
+```{r}
+ned_stop_phrases %>% 
+  filter(!Stop) %>% 
+  group_by(Index) %>% 
+  mutate(numNonStop=n()) %>% 
+  ungroup() %>% 
+  filter()
+```
+

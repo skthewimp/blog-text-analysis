@@ -1,0 +1,171 @@
+---
+title: "NED Analysis"
+output: html_notebook
+---
+
+Analysis of my blog in 2022
+
+```{r}
+require(xml2)
+require(tidytable)
+require(tidyverse)
+require(lubridate)
+```
+
+
+```{r}
+read_xml('~/Downloads/pertinentobservations.WordPress.2023-01-02.xml') %>% as_list() -> ned
+
+```
+
+
+
+```{r}
+bind_rows(lapply(ned[[1]][[1]], as_tibble,  .name_repair = 'minimal')) -> 
+  ned_df
+```
+
+```{r}
+ned$rss ->
+  ned
+```
+
+```{r}
+ned$channel ->
+  ned
+```
+
+
+```{r}
+ned[names(ned) == "item"] -> 
+  blog
+```
+
+```{r}
+blog[[1]]
+```
+
+
+
+```{r}
+as_tibble(blog[[1]][c("title", "post_id", "post_date", "link", "encoded", "status")]) %>%
+  unnest()
+```
+
+Now can get all posts
+
+```{r}
+bind_rows(
+  lapply(
+    blog, 
+    function(x) 
+      unnest(as_tibble(x[c("title", "post_id", "post_date", "link", "encoded", "status")]))
+  )
+) -> 
+  posts
+```
+
+```{r}
+posts %>%
+  mutate(
+    post_date = as.POSIXct(post_date)
+  ) %>%
+  arrange(post_date) -> 
+  posts
+```
+
+```{r}
+posts %>%
+  count(status)
+```
+
+
+Look at posts in each month
+
+```{r}
+posts %>%
+  filter(status == "publish")  %>%
+  transmute(
+    Month = month(post_date),
+    Year = year(post_date),
+    title = title
+    ) %>%
+  distinct(title, Year, Month) %>%
+  count(Year, Month) %>%
+  complete(Year, Month, fill = list(n = 0))  %>%
+  mutate(Date = make_date(Year, Month, 1)) -> 
+  monthly
+```
+
+
+```{r fig.height=5, fig.width=13}
+monthly %>%
+  ggplot(aes(x = Date, y = n)) + geom_step() + geom_point() + scale_x_date("", date_breaks = '1 year', date_labels = '%Y') + theme_bw() + theme(text = element_text(face = 'bold')) + ylab("Word count") + ggtitle("Noenthuda.com: Number of posts by month (since inception)")
+```
+
+
+Since 2019
+
+```{r}
+monthly %>%
+  filter(Year >= 2019) %>%
+  ggplot(aes(x = Date, y = n, label = n)) + geom_step() + geom_point() + scale_x_date("", date_breaks = '6 months', date_labels = '%Y-%m') + geom_text(fontface = 'bold', vjust = -0.5, size = 3)
+
+```
+
+Blog post average (median) length over time 
+
+```{r}
+posts %>%
+  filter(status == "publish")  %>%
+  mutate.(
+    word_count = map(encoded, str_count, '\\S+'),
+        Date = floor_date(post_date, '1 month')
+  ) %>%
+  unnest(word_count) %>%
+  summarise.(
+    avg_length = median(word_count),
+    posts = n(), 
+    .by = Date
+  ) %>%
+  filter(posts >= 3) %>%
+  ggplot(aes(x = Date, y = avg_length)) + geom_point() + geom_smooth(span = 0.2) + scale_x_datetime("", date_breaks = '1 year', date_labels = '%Y') + theme_bw() + theme(text = element_text(face = 'bold')) + ylab("Word count") + ggtitle("Noenthuda.com: Average word count by month (since inception)")
+```
+
+Recheck this weird data point in 2012
+
+```{r}
+posts %>%
+  filter(status == "publish") %>%
+  mutate.(
+    word_count = map(encoded, str_count, '\\S+'),
+        Date = floor_date(post_date, '1 month')
+  ) %>%
+  filter(year(Date) >= 2011) %>%
+  unnest(word_count) %>%
+  arrange(word_count) %>%
+  select(Date, title, status, word_count, everything())
+```
+
+
+Put a minimum of 100 words and see
+
+```{r}
+posts %>%
+  filter(status == "publish")  %>%
+  mutate.(
+    word_count = map(encoded, str_count, '\\S+'),
+        Date = floor_date(post_date, '1 month')
+  ) %>%
+  unnest(word_count) %>%
+  filter(word_count >= 100) %>%
+  summarise.(
+    avg_length = median(word_count),
+    posts = n(), 
+    .by = Date
+  ) %>%
+  filter(posts >= 3) %>%
+  ggplot(aes(x = Date, y = avg_length)) + geom_point() + geom_smooth(span = 0.2) + scale_x_datetime("", date_breaks = '1 year', date_labels = '%Y') + theme_bw() + theme(text = element_text(face = 'bold')) + ylab("Word count") + ggtitle("Noenthuda.com: Average word count by month (since inception)")
+
+```
+
